@@ -21,6 +21,7 @@ import math
 import os
 
 import numpy as np
+import pandas as pd
 import pytest
 
 filename = inspect.getframeinfo(inspect.currentframe()).filename
@@ -36,6 +37,7 @@ from Basilisk.utilities import macros
 from Basilisk.simulation import gravityEffector
 from Basilisk.simulation import vscmgStateEffector
 from Basilisk.architecture import messaging
+from Basilisk.architecture.sysModel import SysModel
 
 mpl.rc("figure", figsize=(5.75,4))
 
@@ -101,6 +103,36 @@ def findPeaks(Y,maxfind):
 
         return peakIdxs
 
+def mrp2Quaternion(sigma):
+    """Convert Modified Rodrigues Parameter to Quaternion [q0, q1, q2, q3]"""
+    sigma_norm = np.linalg.norm(sigma)
+    if sigma_norm < 1e-10:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    q0 = (1 - sigma_norm**2) / (1 + sigma_norm**2)
+    q_vec = 2 * sigma / (1 + sigma_norm**2)
+    return np.array([q0, q_vec[0], q_vec[1], q_vec[2]])
+
+def mrp2EulerAngles(sigma):
+    """Convert Modified Rodrigues Parameter to Euler angles [roll, pitch, yaw] in radians"""
+    sigma_norm = np.linalg.norm(sigma)
+    if sigma_norm < 1e-10:
+        return np.array([0.0, 0.0, 0.0])
+
+    q0 = (1 - sigma_norm**2) / (1 + sigma_norm**2)
+    q_vec = 2 * sigma / (1 + sigma_norm**2)
+    q1, q2, q3 = q_vec[0], q_vec[1], q_vec[2]
+
+    # Roll (phi)
+    roll = np.arctan2(2*(q0*q1 + q2*q3), 1 - 2*(q1**2 + q2**2))
+
+    # Pitch (theta)
+    pitch = np.arcsin(2*(q0*q2 - q3*q1))
+
+    # Yaw (psi)
+    yaw = np.arctan2(2*(q0*q3 + q1*q2), 1 - 2*(q2**2 + q3**2))
+
+    return np.array([roll, pitch, yaw])
+
 
 @pytest.mark.parametrize("useFlag, testCase", [
     (False,'BalancedWheels'),
@@ -118,6 +150,345 @@ def test_VSCMGIntegratedTest(show_plots,useFlag,testCase):
     """Module Unit Test"""
     [testResults, testMessage] = VSCMGIntegratedTest(show_plots,useFlag,testCase)
     assert testResults < 1, testMessage
+
+# Reading the CSV
+df = pd.read_csv(r"C:\Users\gavin.furtado\Desktop\Workspace Gavin\Projects\Ladybird\LBEph - LBEph.csv", nrows=0)  # nrows=0 reads only the header
+print(list(df.columns))
+
+def quaternion_to_mrp_optimal(q):
+    """
+    Convert quaternion to MRP with shadow set handling
+    Returns the MRP with smaller magnitude (< 1)
+    
+    Args:
+        q (array-like): Quaternion [q0, q1, q2, q3]
+    
+    Returns:
+        sigma (ndarray): MRP [σ1, σ2, σ3]
+    """
+    import numpy as np
+    
+    q = np.atleast_1d(q)
+    
+    if q.ndim == 1:
+        q0, q1, q2, q3 = q[0], q[1], q[2], q[3]
+        
+        if abs(1 + q0) < 1e-10:
+            return np.array([0.0, 0.0, 0.0])
+        
+        # Primary MRP
+        sigma = np.array([q1, q2, q3]) / (1 + q0)
+        
+        # Check magnitude and use shadow set if needed
+        sigma_norm = np.linalg.norm(sigma)
+        if sigma_norm > 1.0:
+            # Use shadow set: σ_shadow = -σ / ||σ||²
+            sigma = -sigma / (sigma_norm ** 2)
+        
+        return sigma
+    
+    else:
+        q0 = q[:, 0]
+        q_vec = q[:, 1:4]
+        
+        denominator = 1 + q0
+        denominator[abs(denominator) < 1e-10] = 1e-10
+        
+        sigma = q_vec / denominator[:, np.newaxis]
+        
+        # Handle shadow set for each MRP
+        sigma_norms = np.linalg.norm(sigma, axis=1)
+        shadow_mask = sigma_norms > 1.0
+        sigma[shadow_mask] = -sigma[shadow_mask] / (sigma_norms[shadow_mask][:, np.newaxis] ** 2)
+        
+        return sigma
+
+def roll_to_mrp(roll_rad):
+    """
+    Convert roll angle (rotation about X-axis) to MRP
+    
+    For pure roll rotation:
+    θ = roll angle
+    e = [1, 0, 0] (rotation axis)
+    σ = tan(θ/4) * e = [tan(θ/4), 0, 0]
+    """
+    sigma = np.tan(roll_rad / 4.0)
+    return np.array([sigma, 0.0, 0.0])
+
+
+# Convert desired attitudes
+roll_initial_deg = 0.0
+roll_final_deg = 30.0
+
+roll_initial_rad = np.radians(roll_initial_deg)
+roll_final_rad = np.radians(roll_final_deg)
+
+mrp_initial = roll_to_mrp(roll_initial_rad)
+mrp_final = roll_to_mrp(roll_final_rad)
+
+print(f"Initial roll: {roll_initial_deg}deg -> MRP: {mrp_initial}")
+print(f"Final roll:   {roll_final_deg}deg -> MRP: {mrp_final}")
+
+def generateRollManeuverProfile(roll_initial_deg, roll_final_deg, maneuver_time_sec, dt=0.1):
+    """
+    Generate smooth roll maneuver profile
+    
+    Args:
+        roll_initial_deg: Initial roll angle [degrees]
+        roll_final_deg: Final roll angle [degrees]
+        maneuver_time_sec: Time to complete maneuver [seconds]
+        dt: Time step [seconds]
+    
+    Returns:
+        DataFrame with guidance profile
+    """   
+    # Convert to radians
+    roll_i = np.radians(roll_initial_deg)
+    roll_f = np.radians(roll_final_deg)
+    
+    # Time array
+    time = np.arange(0, maneuver_time_sec + dt, dt)
+    
+    # Trapezoidal velocity profile
+    # Accelerate for 1/3 time, coast for 1/3 time, decelerate for 1/3 time
+    accel_time = maneuver_time_sec / 3.0
+    coast_end = 2 * maneuver_time_sec / 3.0
+    
+    sigma_x = []
+    omega_x = []
+    
+    for t in time:
+        if t <= accel_time:
+            # Accelerating phase
+            omega = (roll_f - roll_i) / maneuver_time_sec * 3.0  # 0.088 rad/s for 30° over 2s
+            roll = roll_i + 0.5 * omega * t**2 / accel_time
+            omega_val = omega * t / accel_time
+            
+        elif t <= coast_end:
+            # Coasting phase
+            omega = (roll_f - roll_i) / maneuver_time_sec * 3.0
+            roll = roll_i + (roll_f - roll_i) * (1/3 + (t - accel_time) / maneuver_time_sec)
+            omega_val = omega
+            
+        else:
+            # Decelerating phase
+            t_decel = t - coast_end
+            omega = (roll_f - roll_i) / maneuver_time_sec * 3.0
+            roll = roll_f - 0.5 * omega * (maneuver_time_sec - t_decel)**2 / accel_time
+            omega_val = omega * (1 - t_decel / accel_time)
+        
+        # Convert roll to MRP
+        sigma_val = np.tan(roll / 4.0)
+        sigma_x.append(sigma_val)
+        omega_x.append(omega_val)
+    
+    # Create DataFrame
+    df = pd.DataFrame({
+        'time': time,
+        'sigma_x': sigma_x,
+        'sigma_y': np.zeros_like(time),
+        'sigma_z': np.zeros_like(time),
+        'omega_x': omega_x,
+        'omega_y': np.zeros_like(time),
+        'omega_z': np.zeros_like(time)
+    })
+    
+    return df
+
+def calculateAngularAcceleration(guidance_df):
+    """
+    Calculate angular acceleration from angular velocity
+    α = dω/dt
+    """
+    import numpy as np
+    
+    # Time and angular velocity arrays
+    time = guidance_df['time'].values
+    omega_x = guidance_df['omega_x'].values
+    omega_y = guidance_df['omega_y'].values
+    omega_z = guidance_df['omega_z'].values
+    
+    # Calculate time derivatives (finite difference)
+    alpha_x = np.gradient(omega_x, time)  # dω_x/dt
+    alpha_y = np.gradient(omega_y, time)  # dω_y/dt
+    alpha_z = np.gradient(omega_z, time)  # dω_z/dt
+    
+    return alpha_x, alpha_y, alpha_z
+
+def calculateBodyTorque(guidance_df, inertia_matrix):
+    """
+    Calculate body torque from angular velocity and inertia
+    
+    τ = I · α
+    
+    Args:
+        guidance_df: DataFrame with time and omega values
+        inertia_matrix: 3x3 spacecraft inertia matrix [kg·m²]
+    
+    Returns:
+        DataFrame with torque components
+    """
+    import numpy as np
+    
+    # Calculate angular acceleration
+    time = guidance_df['time'].values
+    omega = guidance_df[['omega_x', 'omega_y', 'omega_z']].values
+    
+    # Time derivatives
+    alpha = np.gradient(omega, time, axis=0)
+    
+    # Calculate torque: τ = I · α
+    torque = np.zeros_like(alpha)
+    for i in range(len(alpha)):
+        torque[i] = inertia_matrix @ alpha[i]
+    
+    # Create output DataFrame
+    result_df = guidance_df.copy()
+    result_df['tau_x'] = torque[:, 0]
+    result_df['tau_y'] = torque[:, 1]
+    result_df['tau_z'] = torque[:, 2]
+    
+    return result_df
+
+
+
+#==========================================
+def buildTorqueAuthorityMatrix(VSCMGs):
+    """
+    Build torque authority matrix A where:
+    τ_body = A @ u_gimbal
+    
+    Each column represents the torque contribution of one VSCMG gimbal command.
+    
+    Args:
+        VSCMGs: List of VSCMG configurations
+    
+    Returns:
+        A: 3×N matrix where N is number of VSCMGs
+        h: List of wheel momentum values for each VSCMG
+    """
+    import numpy as np
+    
+    N = len(VSCMGs)
+    A = np.zeros((3, N))
+    h = np.zeros(N)
+    
+    for i, vscmg in enumerate(VSCMGs):
+        # Wheel momentum: h = I_wheel * Omega
+        # IW1 is the wheel inertia along spin axis
+        h[i] = vscmg.IW1 * vscmg.Omega  # [kg·m²·rad/s]
+        
+        # Torque axis (normalize if needed)
+        gtHat = np.array(vscmg.gtHat0_B).flatten()
+        gtHat = gtHat / np.linalg.norm(gtHat)
+        
+        # Torque authority column: h_i * gtHat_i
+        A[:, i] = h[i] * gtHat
+    
+    return A, h
+
+def mapTorqToGimbalCmds(tau_desired, A, method='pseudo_inverse', gain_matrix=None):
+    """
+    Map desired body torques to gimbal torque commands.
+    
+    Two methods:
+    1. 'pseudo_inverse': u = A^+ @ τ (least-squares solution)
+    2. 'gain_matrix': u = K @ τ (if K provided)
+    
+    Args:
+        tau_desired: 3-element array of desired body torques [Nm]
+        A: Torque authority matrix (3×N)
+        method: 'pseudo_inverse' or 'gain_matrix'
+        gain_matrix: K matrix if using gain method
+    
+    Returns:
+        u_gimbal: N-element array of gimbal torque commands [Nm]
+    """
+    import numpy as np
+    
+    if method == 'pseudo_inverse':
+        # Least-squares solution
+        A_pinv = np.linalg.pinv(A)
+        u_gimbal = A_pinv @ tau_desired
+    elif method == 'gain_matrix' and gain_matrix is not None:
+        u_gimbal = gain_matrix @ tau_desired
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    return u_gimbal
+
+def analyzeVSCMGResponse(speedLog, gimbalAngles, gimbalRates, wheelSpeeds, 
+                         guidance_df, torque_df, VSCMGs):
+    """
+    Analyze VSCMG gimbal and wheel response to commanded torques.
+    
+    Args:
+        speedLog: Basilisk speed output log
+        gimbalAngles: Gimbal angles from simulation [rad]
+        gimbalRates: Gimbal rates from simulation [rad/s]
+        wheelSpeeds: Wheel speeds from simulation [rad/s]
+        guidance_df: Guidance profile DataFrame
+        torque_df: Torque profile DataFrame
+        VSCMGs: List of VSCMG configurations
+    
+    Returns:
+        Analysis dict with responses
+    """
+    import numpy as np
+    
+    sim_time = speedLog.times() * 1.0E-9  # Convert to seconds
+    N = len(VSCMGs)
+    
+    print("\n" + "="*80)
+    print("VSCMG RESPONSE ANALYSIS")
+    print("="*80)
+    
+    # Check gimbal angle changes
+    print(f"\nGimbal Angle Response:")
+    for i in range(N):
+        gamma_init = gimbalAngles[0, i]
+        gamma_final = gimbalAngles[-1, i]
+        gamma_change = np.degrees(gamma_final - gamma_init)
+        print(f"  VSCMG {i}: delta_gamma = {gamma_change:.4f}deg ({gamma_final-gamma_init:.6f} rad)")
+    
+    # Check gimbal rate peaks
+    print(f"\nGimbal Rate Response:")
+    for i in range(N):
+        rate_max = np.max(np.abs(gimbalRates[:, i]))
+        rate_max_deg = np.degrees(rate_max)
+        print(f"  VSCMG {i}: Max gamma_mod = {rate_max_deg:.4f}°/s ({rate_max:.6f} rad/s)")
+    
+    # Check wheel speed changes
+    print(f"\nWheel Speed Response:")
+    for i in range(N):
+        omega_init = wheelSpeeds[0, i]
+        omega_final = wheelSpeeds[-1, i]
+        omega_change_rpm = (omega_final - omega_init) * 60 / (2*np.pi)
+        print(f"  VSCMG {i}: delta_omega = {omega_change_rpm:.2f} RPM")
+    
+    # Check torque capacity
+    print(f"\nTorque Capacity vs. Requirement:")
+    if 'tau_x' in torque_df.columns:
+        tau_mag = np.sqrt(
+            torque_df['tau_x'].values**2 + 
+            torque_df['tau_y'].values**2 + 
+            torque_df['tau_z'].values**2
+        )
+        tau_max = np.max(tau_mag)
+        tau_mean = np.mean(tau_mag)
+        print(f"  Required torque - Max: {tau_max:.6f} Nm, Mean: {tau_mean:.6f} Nm")
+    
+    print("="*80 + "\n")
+    
+    return {
+        'gimbal_angles': gimbalAngles,
+        'gimbal_rates': gimbalRates,
+        'wheel_speeds': wheelSpeeds
+    }
+
+
+
+#==========================================
 
 def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     # The __tracebackhide__ setting influences pytest showing of tracebacks:
@@ -139,11 +510,11 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
 
     # Create test thread
     if testCase == 'JitterFullyCoupled' or testCase == 'JitterFullyCoupledGravity':
-        dt = 0.00001
-        duration = 0.01
+        dt = 0.001
+        duration = 5.0
     else:
         dt = 0.001
-        duration = 1.
+        duration = 3.
     testProcessRate = macros.sec2nano(dt)  # update process rate update time
     testProc = unitTestSim.CreateNewProcess(unitProcessName)
     testProc.addTask(unitTestSim.CreateNewTask(unitTaskName, testProcessRate))
@@ -151,34 +522,73 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     # add RW devices
     VSCMGs = []
 
-    ang = 54.75 * np.pi/180
+    # CMG Pyramid Configuration
+    theta_skew = 55.0 * np.pi / 180  # Skew angle [rad]
+    theta_elev = 35.0 * np.pi / 180  # Elevation angle [rad]
+    
+    # Azimuths: 0°, 90°, 180°, 270°
+    azimuths_deg = [0.0, 90.0, 180.0, 270.0]
+    azimuths_rad = [az * np.pi / 180 for az in azimuths_deg]
 
     VSCMGs.append(defaultVSCMG())
-    VSCMGs[0].gsHat0_B = [[1.0], [0.0], [0.0]]
-    VSCMGs[0].gtHat0_B = [[0.0], [1.0], [0.0]]
-    VSCMGs[0].ggHat_B = [[0.0], [0.0], [1.0]]
+    az0 = azimuths_rad[0]
+    VSCMGs[0].gsHat0_B = [[np.sin(theta_skew) * np.cos(az0)], 
+                           [np.sin(theta_skew) * np.sin(az0)], 
+                           [np.cos(theta_skew)]]
+    VSCMGs[0].ggHat_B = [[np.cos(theta_elev) * (-np.sin(az0))], 
+                          [np.cos(theta_elev) * np.cos(az0)], 
+                          [np.sin(theta_elev)]]
+    VSCMGs[0].gtHat0_B = np.cross(np.array([np.sin(theta_skew) * np.cos(az0), np.sin(theta_skew) * np.sin(az0), np.cos(theta_skew)]), 
+                                   np.array([np.cos(theta_elev) * (-np.sin(az0)), np.cos(theta_elev) * np.cos(az0), np.sin(theta_elev)]))
     VSCMGs[0].Omega = 2000 * macros.RPM
     VSCMGs[0].gamma = 0.
-    VSCMGs[0].gammaDot = 0.06
-    VSCMGs[0].rGB_B = [[0.1], [0.002], [-0.02]]
+    VSCMGs[0].gammaDot = 0.0
+    VSCMGs[0].rGB_B = [[0.1], [0.0], [0.05]]
 
     VSCMGs.append(defaultVSCMG())
-    VSCMGs[1].gsHat0_B = [[0.0], [1.0], [0.0]]
-    VSCMGs[1].ggHat_B = [[math.cos(ang)], [0.0], [math.sin(ang)]]
-    VSCMGs[1].gtHat0_B = np.cross(np.array([math.cos(ang), 0.0, math.sin(ang)]),np.array([0.0, 1.0, 0.0]))
-    VSCMGs[1].Omega =  350 * macros.RPM
+    az1 = azimuths_rad[1]
+    VSCMGs[1].gsHat0_B = [[np.sin(theta_skew) * np.cos(az1)], 
+                           [np.sin(theta_skew) * np.sin(az1)], 
+                           [np.cos(theta_skew)]]
+    VSCMGs[1].ggHat_B = [[np.cos(theta_elev) * (-np.sin(az1))], 
+                          [np.cos(theta_elev) * np.cos(az1)], 
+                          [np.sin(theta_elev)]]
+    VSCMGs[1].gtHat0_B = np.cross(np.array([np.sin(theta_skew) * np.cos(az1), np.sin(theta_skew) * np.sin(az1), np.cos(theta_skew)]), 
+                                   np.array([np.cos(theta_elev) * (-np.sin(az1)), np.cos(theta_elev) * np.cos(az1), np.sin(theta_elev)]))
+    VSCMGs[1].Omega =  2000 * macros.RPM
     VSCMGs[1].gamma = 0.
-    VSCMGs[1].gammaDot = 0.011
-    VSCMGs[1].rGB_B = [[0.0], [-0.05], [0.0]]
+    VSCMGs[1].gammaDot = 0.0
+    VSCMGs[1].rGB_B = [[0.0], [0.1], [0.05]]
 
     VSCMGs.append(defaultVSCMG())
-    VSCMGs[2].gsHat0_B = [[0.0], [-1.0], [0.0]]
-    VSCMGs[2].ggHat_B = [[-math.cos(ang)], [0.0], [math.sin(ang)]]
-    VSCMGs[2].gtHat0_B = np.cross(np.array([-math.cos(ang), 0.0, math.sin(ang)]),np.array([0.0, -1.0, 0.0]))
-    VSCMGs[2].Omega = -900 * macros.RPM
+    az2 = azimuths_rad[2]
+    VSCMGs[2].gsHat0_B = [[np.sin(theta_skew) * np.cos(az2)], 
+                           [np.sin(theta_skew) * np.sin(az2)], 
+                           [np.cos(theta_skew)]]
+    VSCMGs[2].ggHat_B = [[np.cos(theta_elev) * (-np.sin(az2))], 
+                          [np.cos(theta_elev) * np.cos(az2)], 
+                          [np.sin(theta_elev)]]
+    VSCMGs[2].gtHat0_B = np.cross(np.array([np.sin(theta_skew) * np.cos(az2), np.sin(theta_skew) * np.sin(az2), np.cos(theta_skew)]), 
+                                   np.array([np.cos(theta_elev) * (-np.sin(az2)), np.cos(theta_elev) * np.cos(az2), np.sin(theta_elev)]))
+    VSCMGs[2].Omega = 2000 * macros.RPM
     VSCMGs[2].gamma = 0.
-    VSCMGs[2].gammaDot = -0.003
-    VSCMGs[2].rGB_B = [[-0.1], [0.05], [0.05]]
+    VSCMGs[2].gammaDot = 0.0
+    VSCMGs[2].rGB_B = [[-0.1], [0.0], [0.05]]
+
+    VSCMGs.append(defaultVSCMG())
+    az3 = azimuths_rad[3]
+    VSCMGs[3].gsHat0_B = [[np.sin(theta_skew) * np.cos(az3)], 
+                           [np.sin(theta_skew) * np.sin(az3)], 
+                           [np.cos(theta_skew)]]
+    VSCMGs[3].ggHat_B = [[np.cos(theta_elev) * (-np.sin(az3))], 
+                          [np.cos(theta_elev) * np.cos(az3)], 
+                          [np.sin(theta_elev)]]
+    VSCMGs[3].gtHat0_B = np.cross(np.array([np.sin(theta_skew) * np.cos(az3), np.sin(theta_skew) * np.sin(az3), np.cos(theta_skew)]), 
+                                   np.array([np.cos(theta_elev) * (-np.sin(az3)), np.cos(theta_elev) * np.cos(az3), np.sin(theta_elev)]))
+    VSCMGs[3].Omega = 2000 * macros.RPM          # Wheel speed
+    VSCMGs[3].gamma = 0.                         # Gimbal angle
+    VSCMGs[3].gammaDot = 0.0                     # Gimbal rate
+    VSCMGs[3].rGB_B = [[0.0], [-0.1], [0.05]]   # Position in body frame
 
     if testCase == 'BalancedWheels':
         VSCMGModel = 0
@@ -191,7 +601,7 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
         VSCMG.VSCMGModel = VSCMGModel
 
     if testCase == 'JitterFullyCoupled':
-        VSCMGs = [VSCMGs[0],VSCMGs[2]]
+        VSCMGs = [VSCMGs[0],VSCMGs[1],VSCMGs[2],VSCMGs[3]]
 
     N = len(VSCMGs)
 
@@ -202,16 +612,89 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
         rwStateEffector.AddVSCMG(item)
     scObject.addStateEffector(rwStateEffector)
 
-    # set RW torque command
-    cmdArray = messaging.VSCMGArrayTorqueMsgPayload()
-    if testCase == 'BalancedWheels' or testCase == 'JitterFullyCoupled':
-        cmdArray.wheelTorque = [0.0, 0.0, 0.0]  # [Nm]
-        cmdArray.gimbalTorque = [0.0, 0.0, 0.0]  # [Nm]
-    else:
-        cmdArray.wheelTorque = [0.001, 0.005, -0.009] # [Nm]
-        cmdArray.gimbalTorque = [0.008, -0.0015, -0.006] # [Nm]
-    cmdMsg = messaging.VSCMGArrayTorqueMsg().write(cmdArray)
-    rwStateEffector.cmdsInMsg.subscribeTo(cmdMsg)
+    # ===== FSW CONTROLLER SETUP =====
+    from Basilisk.fswAlgorithms import mrpFeedback
+    from Basilisk.fswAlgorithms import inertial3D
+    from Basilisk.fswAlgorithms import attTrackingError
+    from Basilisk.simulation import simpleNav
+
+    # Navigation module
+    sNavObject = simpleNav.SimpleNav()
+    sNavObject.ModelTag = "SimpleNav"
+    sNavObject.scStateInMsg.subscribeTo(scObject.scStateOutMsg)
+
+    # Reference attitude (desired: 30° roll maneuver)
+    inertialObj = inertial3D.inertial3D()
+    inertialObj.ModelTag = "inertial3D"
+    sigma_desired = roll_to_mrp(np.radians(30.0))
+    inertialObj.sigma_R0N = sigma_desired.tolist()
+
+    # Use a desired pitch/yaw that cancels coupling:
+    # sigma_des_roll = roll_to_mrp(np.radians(30.0))
+    # sigma_des_pitch = roll_to_mrp(np.radians(0.0))  # Adjusted to suppress coupling
+    # sigma_des_yaw = roll_to_mrp(np.radians(0.0))   # Adjusted to suppress coupling
+    # inertialObj.sigma_R0N = [sigma_des_roll[0], sigma_des_pitch[1], sigma_des_yaw[2]]
+
+    # Tracking error
+    attError = attTrackingError.attTrackingError()
+    attError.ModelTag = "attError"
+    attError.attNavInMsg.subscribeTo(sNavObject.attOutMsg)
+    attError.attRefInMsg.subscribeTo(inertialObj.attRefOutMsg)
+
+    # MRP Feedback Controller
+    mrpControl = mrpFeedback.mrpFeedback()
+    mrpControl.ModelTag = "mrpFeedback"
+    mrpControl.K = 3.5      # Proportional gain [Nm/(MRP unit)]
+    mrpControl.P = 7.5     # Rate feedback gain [Nm·s/rad]
+    mrpControl.Ki = -1.0    # Integral gain (negative = off)
+
+    # Vehicle config
+    configData = messaging.VehicleConfigMsgPayload()
+    configData.ISCPntB_B = [55.61, 0.0, 0.0, 0.0, 105.93, 0.0, 0.0, 0.0, 114.81]
+    configMsg = messaging.VehicleConfigMsg().write(configData)
+    mrpControl.vehConfigInMsg.subscribeTo(configMsg)
+    mrpControl.guidInMsg.subscribeTo(attError.attGuidOutMsg)
+
+    # Build torque authority matrix for gimbal command mapping
+    A, h = buildTorqueAuthorityMatrix(VSCMGs)
+    print(f"\nTorque Authority Matrix A (3×{N}):")
+    print(A)
+    print(f"Wheel Momenta h: {h}\n")
+
+    # Custom gimbal command mapper
+    class VSCMGCommandMapper(SysModel):
+        def __init__(self, A, N):
+            super().__init__()
+            self.ModelTag = "VSCMGCommandMapper"
+            self.A = A
+            self.N = N
+            self.cmdTorqueInMsg = None
+            self.cmdArrayMsg = messaging.VSCMGArrayTorqueMsg()
+
+        def UpdateState(self, CurrentSimNanos):
+            if self.cmdTorqueInMsg is not None:
+                cmdTorque = self.cmdTorqueInMsg.read()
+                tau_desired = np.array([cmdTorque.torqueRequestBody[0],
+                                       cmdTorque.torqueRequestBody[1],
+                                       cmdTorque.torqueRequestBody[2]])
+                u_gimbal = mapTorqToGimbalCmds(tau_desired, self.A, method='pseudo_inverse')
+
+                cmdArray = messaging.VSCMGArrayTorqueMsgPayload()
+                cmdArray.wheelTorque = [0.0] * self.N
+                cmdArray.gimbalTorque = u_gimbal.tolist()
+                self.cmdArrayMsg.write(cmdArray)
+
+    # Setup mapper
+    cmdMapper = VSCMGCommandMapper(A, N)
+    cmdMapper.cmdTorqueInMsg = mrpControl.cmdTorqueOutMsg
+    rwStateEffector.cmdsInMsg.subscribeTo(cmdMapper.cmdArrayMsg)
+
+    # Add modules to task
+    unitTestSim.AddModelToTask(unitTaskName, sNavObject)
+    unitTestSim.AddModelToTask(unitTaskName, inertialObj)
+    unitTestSim.AddModelToTask(unitTaskName, attError)
+    unitTestSim.AddModelToTask(unitTaskName, mrpControl)
+    unitTestSim.AddModelToTask(unitTaskName, cmdMapper)
 
     # Add test module to runtime call list
     unitTestSim.AddModelToTask(unitTaskName, rwStateEffector)
@@ -225,9 +708,9 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
 
         scObject.gravField.gravBodies = spacecraft.GravBodyVector([unitTestSim.earthGravBody])
 
-    scObject.hub.mHub = 750.0
-    scObject.hub.r_BcB_B = [[-0.0002], [0.0001], [0.1]]
-    scObject.hub.IHubPntBc_B = [[900.0, 0.0, 0.0], [0.0, 800.0, 0.0], [0.0, 0.0, 600.0]]
+    scObject.hub.mHub = 212.54 #LB value
+    scObject.hub.r_BcB_B = [[-0.01], [-0.09], [0.51]] #LB value
+    scObject.hub.IHubPntBc_B = [[55.61, 0.0, 0.0], [0.0, 105.93, 0.0], [0.0, 0.0, 114.81]] #LB value
 
     if testCase == 'JitterFullyCoupled':
         scObject.hub.r_CN_NInit = [[0.1],	[-0.2],	[0.3]]
@@ -236,7 +719,7 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
         scObject.hub.r_CN_NInit = [[-4020338.690396649],	[7490566.741852513],	[5248299.211589362]]
         scObject.hub.v_CN_NInit = [[-5199.77710904224],	[-3436.681645356935],	[1041.576797498721]]
     scObject.hub.sigma_BNInit = [[0.0], [0.0], [0.0]]
-    scObject.hub.omega_BN_BInit = [[0.08], [0.01], [0.0]]
+    scObject.hub.omega_BN_BInit = [[0.0], [0.0], [0.0]]
 
     # log data
     dataLog = scObject.scStateOutMsg.recorder()
@@ -255,7 +738,7 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     sigmaRef = scObject.dynManager.getStateObject(scObject.hub.nameOfHubSigma)
 
     unitTestSim.ExecuteSimulation()
-
+    
     orbAngMom_N = simHelpers.addTimeColumn(scObjectLog.times(), scObjectLog.totOrbAngMomPntN_N)
     rotAngMom_N = simHelpers.addTimeColumn(scObjectLog.times(), scObjectLog.totRotAngMomPntC_N)
     rotEnergy = simHelpers.addTimeColumn(scObjectLog.times(), scObjectLog.totRotEnergy)
@@ -266,6 +749,48 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     gimbalRates = speedLog.gimbalRates
     sigmaData = dataLog.sigma_BN
     omegaData = dataLog.omega_BN_B
+
+    # Convert gimbal angles to degrees
+    gimbalAngles_deg = np.degrees(gimbalAngles)
+
+    # Convert gimbal rates to rad/s (already in rad/s) and degrees/s
+    gimbalRates_rad = gimbalRates
+    gimbalRates_deg = np.degrees(gimbalRates)
+
+    # Convert sigma to Quaternions and Euler angles
+    quaternions = np.zeros((len(sigmaData), 4))
+    eulerAngles = np.zeros((len(sigmaData), 3))
+    eulerAngles_deg = np.zeros((len(sigmaData), 3))
+
+    for i in range(len(sigmaData)):
+        quaternions[i] = mrp2Quaternion(sigmaData[i])
+        eulerAngles[i] = mrp2EulerAngles(sigmaData[i])
+        eulerAngles_deg[i] = np.degrees(eulerAngles[i])
+
+    # Print conversions to console
+    print("\n" + "="*80)
+    print("ATTITUDE CONVERSIONS AND DATA LOGGING")
+    print("="*80)
+    print(f"\nInitial State:")
+    print(f"  MRP (sigma): {sigmaData[0]}")
+    print(f"  Quaternion (q0, q1, q2, q3): {quaternions[0]}")
+    print(f"  Euler Angles [rad]: {eulerAngles[0]}")
+    print(f"  Euler Angles [deg]: {eulerAngles_deg[0]}")
+
+    print(f"\nFinal State:")
+    print(f"  MRP (sigma): {sigmaData[-1]}")
+    print(f"  Quaternion (q0, q1, q2, q3): {quaternions[-1]}")
+    print(f"  Euler Angles [rad]: {eulerAngles[-1]}")
+    print(f"  Euler Angles [deg]: {eulerAngles_deg[-1]}")
+
+    print(f"\nGimbal Angles (Sample at t=0):")
+    for i in range(N):
+        print(f"  VSCMG {i}: {gimbalAngles[0,i]:.6f} rad = {gimbalAngles_deg[0,i]:.6f} deg")
+
+    print(f"\nGimbal Rates (Sample at t=0):")
+    for i in range(N):
+        print(f"  VSCMG {i}: {gimbalRates_rad[0,i]:.6f} rad/s = {gimbalRates_deg[0,i]:.6f} deg/s")
+    print("="*80 + "\n")
 
     dataPos = posRef.getState()
     dataSigma = sigmaRef.getState()
@@ -341,111 +866,96 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
                 [rotEnergy[-1,1]]
                  ]
     plt.close("all")
-    plt.figure()
-    plt.plot(orbAngMom_N[:,0]*1e-9, orbAngMom_N[:,1] - orbAngMom_N[0,1], orbAngMom_N[:,0]*1e-9, orbAngMom_N[:,2] - orbAngMom_N[0,2], orbAngMom_N[:,0]*1e-9, orbAngMom_N[:,3] - orbAngMom_N[0,3])
-    plt.title("Change in Orbital Angular Momentum")
-    simHelpers.writeFigureLaTeX("ChangeInOrbitalAngularMomentum" + testCase,
-                                     "Change in Orbital Angular Momentum " + testCase, plt, "width=0.80\\textwidth",
-                                     path)
-
-    plt.figure()
-    plt.plot(rotAngMom_N[:,0]*1e-9, rotAngMom_N[:,1] - rotAngMom_N[0,1], rotAngMom_N[:,0]*1e-9, rotAngMom_N[:,2] - rotAngMom_N[0,2], rotAngMom_N[:,0]*1e-9, rotAngMom_N[:,3] - rotAngMom_N[0,3])
-    plt.title("Change in Rotational Angular Momentum")
-    simHelpers.writeFigureLaTeX("ChangeInOrbitalEnergy" + testCase, "Change in Orbital Energy " + testCase, plt,
-                                     "width=0.80\\textwidth", path)
-
-    plt.figure()
-    plt.plot(orbEnergy[:,0]*1e-9, orbEnergy[:,1] - orbEnergy[0,1])
-    plt.title("Change in Orbital Energy")
-    simHelpers.writeFigureLaTeX("ChangeInRotationalAngularMomentum" + testCase,
-                                     "Change in Rotational Angular Momentum " + testCase, plt, "width=0.80\\textwidth",
-                                     path)
-
-    plt.figure()
-    plt.plot(rotEnergy[:,0]*1e-9, rotEnergy[:,1] - rotEnergy[0,1])
-    plt.title("Change in Rotational Energy")
-    simHelpers.writeFigureLaTeX("ChangeInRotationalEnergy" + testCase, "Change in Rotational Energy " + testCase,
-                                     plt, "width=0.80\\textwidth", path)
 
     plt.figure()
     for i in range(0,N):
         plt.subplot(4,1,i+1)
         plt.plot(speedLog.times()*1.0E-9, wheelSpeeds[:,i] / (2.0 * math.pi) * 60, label='RWA' + str(i))
         plt.xlabel('Time (s)')
-        plt.ylabel(r'RW' + str(i) + r' $\Omega$ (RPM)')
+        plt.ylabel(r'RW' + str(i) + r' $\Omega$ [RPM]')
+    plt.suptitle('Wheel Speeds [RPM]', fontsize=14, fontweight='bold', y=1.00)
 
     plt.figure()
     for i in range(0,N):
         plt.subplot(4,1,i+1)
         plt.plot(speedLog.times()*1.0E-9, gimbalAngles[:,i], label=str(i))
         plt.xlabel('Time (s)')
-        plt.ylabel(r'$\gamma_'+str(i)+'$ (rad)')
+        plt.ylabel(r'$\gamma_'+str(i)+'$ [rad]')
+    plt.suptitle('Gimbal Angles [rad]', fontsize=14, fontweight='bold', y=1.00)
+
+    # Gimbal Angles in Degrees
+    plt.figure()
+    for i in range(0,N):
+        plt.subplot(4,1,i+1)
+        plt.plot(speedLog.times()*1.0E-9, gimbalAngles_deg[:,i], label=str(i))
+        plt.xlabel('Time (s)')
+        plt.ylabel(r'$\gamma_'+str(i)+'$ [deg]')
+    plt.suptitle('Gimbal Angles [deg]', fontsize=14, fontweight='bold', y=1.00)
 
     plt.figure()
     for i in range(0,N):
         plt.subplot(4,1,i+1)
         plt.plot(speedLog.times()*1.0E-9, gimbalRates[:,i] * 180/np.pi, label=str(i))
         plt.xlabel('Time (s)')
-        plt.ylabel(r'$\dot{\gamma}_'+str(i)+'$ (d/s)')
+        plt.ylabel(r'$\dot{\gamma}_'+str(i)+'$ [deg/s]')
+    plt.suptitle('Gimbal Rates [deg/s]', fontsize=14, fontweight='bold', y=1.00)
 
+    # Gimbal Rates in rad/s
     plt.figure()
     for i in range(0,N):
+        plt.subplot(4,1,i+1)
+        plt.plot(speedLog.times()*1.0E-9, gimbalRates_rad[:,i], label=str(i))
+        plt.xlabel('Time (s)')
+        plt.ylabel(r'$\dot{\gamma}_'+str(i)+'$ [rad/s]')
+    plt.suptitle('Gimbal Rates [rad/s]', fontsize=14, fontweight='bold', y=1.00)
+
+    plt.figure()
+    for i in range(0,3):
         plt.subplot(4,1,i+1)
         plt.plot(dataLog.times()*1.0E-9, sigmaData[:,i], label='MRP' + str(i))
         plt.xlabel('Time (s)')
-        plt.ylabel(r'MRP b' + str(i))
+        plt.ylabel(r'$\sigma_'+str(i)+'$ [-]')
+    plt.suptitle('Attitude (MRP Components) [-]', fontsize=14, fontweight='bold', y=1.00)
 
     plt.figure()
-    for i in range(0,N):
+    for i in range(0,3):
         plt.subplot(4,1,i+1)
         plt.plot(dataLog.times()*1.0E-9, omegaData[:,i] * 180/math.pi, label='omega' + str(i))
         plt.xlabel('Time (s)')
-        plt.ylabel(r'b' + str(i) + r' $\omega$ (d/s)')
+        plt.ylabel(r'$\omega_'+str(i)+'$ [deg/s]')
+    plt.suptitle('Angular Velocity [deg/s]', fontsize=14, fontweight='bold', y=1.00)
 
-    if testCase != 'BalancedWheels' and testCase != 'JitterFullyCoupledGravity':
-        istart = int(.01/dt)
-        sigmaDataCut = sigmaData#sigmaData[istart:,:]
-        thetaData = np.empty([len(sigmaDataCut[:,0]),2])
-        thetaData[:,0] = sigmaDataCut[:,0]
-        for i in range(0,len(thetaData[:,0])):
-            thetaData[i,1] = 4*np.arctan(np.linalg.norm(sigmaDataCut[i,1:]))
-
-        if testCase == 'JitterSimple':
-            fitOrd = 11
-        else:
-            fitOrd = 9
-
-        thetaFit = np.empty([len(sigmaDataCut[:,0]),2])
-        thetaFit[:,0] = thetaData[:,0]
-        p = np.polyfit(thetaData[:,0]*1e-9,thetaData[:,1],fitOrd)
-        thetaFit[:,1] = np.polyval(p,thetaFit[:,0]*1e-9)
-
-        plt.figure()
-        plt.plot(thetaData[:,0]*1e-9, thetaData[:,1]-thetaFit[:,1])
-        plt.title("Principle Angle Fit")
+    # Body Attitude - Quaternions [q0, q1, q2, q3]
+    plt.figure()
+    labels = ['q0 (scalar)', 'q1 (i)', 'q2 (j)', 'q3 (k)']
+    for i in range(0,4):
+        plt.subplot(4,1,i+1)
+        plt.plot(dataLog.times()*1.0E-9, quaternions[:,i], label=labels[i])
         plt.xlabel('Time (s)')
-        plt.ylabel(r'$\theta$ (deg)')
+        plt.ylabel(labels[i])
+    plt.suptitle('Body Attitude - Quaternions [-]', fontsize=14, fontweight='bold', y=1.00)
 
-        [frq,Y] = computeFFT(thetaData[:,1]-thetaFit[:,1],dt)
-        peakIdxs = findPeaks(Y,N)
-        wheelSpeeds_data = np.array(frq[peakIdxs])*60.
-        wheelSpeeds_true = np.sort(abs(np.array([VSCMG.Omega/macros.RPM for VSCMG in VSCMGs])))
-
-        fig, ax = plt.subplots(2,1)
-        ax[0].plot(thetaFit[:,0]*1e-9,thetaData[:,1]-thetaFit[:,1])
-        ax[0].set_xlabel('Time')
-        ax[0].set_ylabel('Amplitude')
-        ax[1].plot(frq,abs(Y),'r')
-        ax[1].set_xlabel('Freq (Hz)')
-        ax[1].set_ylabel('Magnitude')
-        ax[1].plot(frq[peakIdxs],Y[peakIdxs],'bo')
-        plt.xlim((0,VSCMGs[0].Omega_max/macros.RPM/60.))
-
-        plt.figure()
-        plt.plot(thetaData[:,0]*1e-9, thetaData[:,1])
-        plt.title("Principle Angle")
+    # Body Attitude - Euler Angles [rad]
+    plt.figure()
+    euler_labels_rad = [r'Roll $\phi$ [rad]', r'Pitch $\theta$ [rad]', r'Yaw $\psi$ [rad]']
+    for i in range(0,3):
+        plt.subplot(4,1,i+1)
+        plt.plot(dataLog.times()*1.0E-9, eulerAngles[:,i], label=euler_labels_rad[i])
         plt.xlabel('Time (s)')
-        plt.ylabel(r'$\theta$ (deg)')
+        plt.ylabel(euler_labels_rad[i])
+    plt.suptitle('Body Attitude - Euler Angles [rad]', fontsize=14, fontweight='bold', y=1.00)
+
+    # Body Attitude - Euler Angles [deg]
+    plt.figure()
+    euler_labels_deg = [r'Roll $\phi$ [deg]', r'Pitch $\theta$ [deg]', r'Yaw $\psi$ [deg]']
+    for i in range(0,3):
+        plt.subplot(4,1,i+1)
+        plt.plot(dataLog.times()*1.0E-9, eulerAngles_deg[:,i], label=euler_labels_deg[i])
+        plt.xlabel('Time (s)')
+        plt.ylabel(euler_labels_deg[i])
+    plt.suptitle('Body Attitude - Euler Angles [deg]', fontsize=14, fontweight='bold', y=1.00)
+
+
 
     if show_plots == True:
         plt.show()
@@ -463,13 +973,6 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
         if not unitTestSupport.isArrayEqualRelative(dataSigma[i],trueSigma[i],3,accuracy):
             testFailCount += 1
             testMessages.append("FAILED: VSCMG Integrated Test failed attitude unit test")
-
-    if testCase == 'JitterSimple':
-        for i in range(N):
-            # check a vector values
-            if not abs(wheelSpeeds_data[i] - wheelSpeeds_true[i]) / wheelSpeeds_true[i] < .09:
-                testFailCount += 1
-                testMessages.append("FAILED: VSCMG Integrated Test failed jitter unit test")
 
     accuracy = 1e-10
     if testCase == 'BalancedWheels' or testCase == 'JitterFullyCoupled':
@@ -525,4 +1028,4 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     return [testFailCount, ''.join(testMessages)]
 
 if __name__ == "__main__":
-    VSCMGIntegratedTest(False,False,'JitterFullyCoupled')
+    VSCMGIntegratedTest(True,False,'JitterFullyCoupled')
