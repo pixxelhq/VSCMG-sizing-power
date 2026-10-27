@@ -644,8 +644,8 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     # MRP Feedback Controller
     mrpControl = mrpFeedback.mrpFeedback()
     mrpControl.ModelTag = "mrpFeedback"
-    mrpControl.K = 3.5      # Proportional gain [Nm/(MRP unit)]
-    mrpControl.P = 7.5     # Rate feedback gain [Nm·s/rad]
+    mrpControl.K = 1.5      # Proportional gain [Nm/(MRP unit)]
+    mrpControl.P = 3.75     # Rate feedback gain [Nm·s/rad]
     mrpControl.Ki = -1.0    # Integral gain (negative = off)
 
     # Vehicle config
@@ -655,37 +655,37 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     mrpControl.vehConfigInMsg.subscribeTo(configMsg)
     mrpControl.guidInMsg.subscribeTo(attError.attGuidOutMsg)
 
-    # Build torque authority matrix for gimbal command mapping
-    A, h = buildTorqueAuthorityMatrix(VSCMGs)
-    print(f"\nTorque Authority Matrix A (3×{N}):")
-    print(A)
-    print(f"Wheel Momenta h: {h}\n")
-
     # Custom gimbal command mapper
     class VSCMGCommandMapper(SysModel):
-        def __init__(self, A, N):
+        def __init__(self, VSCMGs, N):
             super().__init__()
             self.ModelTag = "VSCMGCommandMapper"
-            self.A = A
+            self.VSCMGs = VSCMGs  
             self.N = N
             self.cmdTorqueInMsg = None
             self.cmdArrayMsg = messaging.VSCMGArrayTorqueMsg()
+            self.speedLog = None  
 
         def UpdateState(self, CurrentSimNanos):
             if self.cmdTorqueInMsg is not None:
+                # ===== REBUILD A EVERY TIMESTEP =====
+                A, h = buildTorqueAuthorityMatrix(self.VSCMGs)  # ← Recompute with current Ω
+                
                 cmdTorque = self.cmdTorqueInMsg.read()
                 tau_desired = np.array([cmdTorque.torqueRequestBody[0],
-                                       cmdTorque.torqueRequestBody[1],
-                                       cmdTorque.torqueRequestBody[2]])
-                u_gimbal = mapTorqToGimbalCmds(tau_desired, self.A, method='pseudo_inverse')
-
+                                    cmdTorque.torqueRequestBody[1],
+                                    cmdTorque.torqueRequestBody[2]])
+                
+                u_gimbal = mapTorqToGimbalCmds(tau_desired, A, method='pseudo_inverse')
+                
                 cmdArray = messaging.VSCMGArrayTorqueMsgPayload()
                 cmdArray.wheelTorque = [0.0] * self.N
                 cmdArray.gimbalTorque = u_gimbal.tolist()
                 self.cmdArrayMsg.write(cmdArray)
 
+
     # Setup mapper
-    cmdMapper = VSCMGCommandMapper(A, N)
+    cmdMapper = VSCMGCommandMapper(VSCMGs, N)
     cmdMapper.cmdTorqueInMsg = mrpControl.cmdTorqueOutMsg
     rwStateEffector.cmdsInMsg.subscribeTo(cmdMapper.cmdArrayMsg)
 
