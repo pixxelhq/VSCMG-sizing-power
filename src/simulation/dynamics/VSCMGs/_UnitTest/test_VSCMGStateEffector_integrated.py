@@ -36,6 +36,17 @@ from Basilisk.utilities import macros
 from Basilisk.simulation import gravityEffector
 from Basilisk.simulation import vscmgStateEffector
 from Basilisk.architecture import messaging
+from Basilisk.utilities import RigidBodyKinematics as rbk
+import numpy as np
+
+import yaml
+# Get the directory of the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, 'config.yaml')
+
+# Load the YAML file
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
 
 mpl.rc("figure", figsize=(5.75,4))
 
@@ -225,18 +236,24 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
 
         scObject.gravField.gravBodies = spacecraft.GravBodyVector([unitTestSim.earthGravBody])
 
-    scObject.hub.mHub = 750.0
+    scObject.hub.mHub = config['spacecraft_mass']
     scObject.hub.r_BcB_B = [[-0.0002], [0.0001], [0.1]]
-    scObject.hub.IHubPntBc_B = [[900.0, 0.0, 0.0], [0.0, 800.0, 0.0], [0.0, 0.0, 600.0]]
-
+    scObject.hub.IHubPntBc_B = config['spacecraft_inertia']  # [kg*m^2]
+    
     if testCase == 'JitterFullyCoupled':
         scObject.hub.r_CN_NInit = [[0.1],	[-0.2],	[0.3]]
         scObject.hub.v_CN_NInit = [[-0.4],	[0.5],	[-0.8]]
     else:
         scObject.hub.r_CN_NInit = [[-4020338.690396649],	[7490566.741852513],	[5248299.211589362]]
         scObject.hub.v_CN_NInit = [[-5199.77710904224],	[-3436.681645356935],	[1041.576797498721]]
-    scObject.hub.sigma_BNInit = [[0.0], [0.0], [0.0]]
-    scObject.hub.omega_BN_BInit = [[0.08], [0.01], [0.0]]
+
+    # Initial spacecraft attitude in Euler angles (321 sequence) 
+    euler_angles_321 = np.deg2rad(config['initial_attitude'])  # Example Euler angles in radians
+    mrp = rbk.euler3212MRP(euler_angles_321)  # Convert Euler angles to MRP
+
+    # set the initial spacecraft attitude and angular velocity states
+    scObject.hub.sigma_BNInit = [mrp[0], mrp[1], mrp[2]]
+    scObject.hub.omega_BN_BInit = [config['initial_angular_velocity'][0], config['initial_angular_velocity'][1], config['initial_angular_velocity'][2]]
 
     # log data
     dataLog = scObject.scStateOutMsg.recorder()
@@ -264,13 +281,19 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     wheelSpeeds = speedLog.wheelSpeeds
     gimbalAngles = speedLog.gimbalAngles
     gimbalRates = speedLog.gimbalRates
-    sigmaData = dataLog.sigma_BN
-    omegaData = dataLog.omega_BN_B
+    sigmaData = dataLog.sigma_BN #plotting
+    omegaData = dataLog.omega_BN_B #plotting
 
     dataPos = posRef.getState()
-    dataSigma = sigmaRef.getState()
+    dataSigma = sigmaRef.getState() #validation
     dataPos = [[dataPos[0][0], dataPos[1][0], dataPos[2][0]]]
-    dataSigma = [[dataSigma[0][0], dataSigma[1][0], dataSigma[2][0]]]
+    dataSigma = [[dataSigma[0][0], dataSigma[1][0], dataSigma[2][0]]] 
+
+    # Convert all MRP data to Euler angles (321 sequence)  
+    eulerAngles = np.array(np.rad2deg([rbk.MRP2Euler321(sigma) for sigma in sigmaData]))
+
+    # Convert time-series MRP to quaternions
+    quaternions = np.array([rbk.MRP2EP(sigma) for sigma in sigmaData])
 
     if testCase == 'BalancedWheels':
         truePos = [
@@ -341,31 +364,6 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
                 [rotEnergy[-1,1]]
                  ]
     plt.close("all")
-    plt.figure()
-    plt.plot(orbAngMom_N[:,0]*1e-9, orbAngMom_N[:,1] - orbAngMom_N[0,1], orbAngMom_N[:,0]*1e-9, orbAngMom_N[:,2] - orbAngMom_N[0,2], orbAngMom_N[:,0]*1e-9, orbAngMom_N[:,3] - orbAngMom_N[0,3])
-    plt.title("Change in Orbital Angular Momentum")
-    simHelpers.writeFigureLaTeX("ChangeInOrbitalAngularMomentum" + testCase,
-                                     "Change in Orbital Angular Momentum " + testCase, plt, "width=0.80\\textwidth",
-                                     path)
-
-    plt.figure()
-    plt.plot(rotAngMom_N[:,0]*1e-9, rotAngMom_N[:,1] - rotAngMom_N[0,1], rotAngMom_N[:,0]*1e-9, rotAngMom_N[:,2] - rotAngMom_N[0,2], rotAngMom_N[:,0]*1e-9, rotAngMom_N[:,3] - rotAngMom_N[0,3])
-    plt.title("Change in Rotational Angular Momentum")
-    simHelpers.writeFigureLaTeX("ChangeInOrbitalEnergy" + testCase, "Change in Orbital Energy " + testCase, plt,
-                                     "width=0.80\\textwidth", path)
-
-    plt.figure()
-    plt.plot(orbEnergy[:,0]*1e-9, orbEnergy[:,1] - orbEnergy[0,1])
-    plt.title("Change in Orbital Energy")
-    simHelpers.writeFigureLaTeX("ChangeInRotationalAngularMomentum" + testCase,
-                                     "Change in Rotational Angular Momentum " + testCase, plt, "width=0.80\\textwidth",
-                                     path)
-
-    plt.figure()
-    plt.plot(rotEnergy[:,0]*1e-9, rotEnergy[:,1] - rotEnergy[0,1])
-    plt.title("Change in Rotational Energy")
-    simHelpers.writeFigureLaTeX("ChangeInRotationalEnergy" + testCase, "Change in Rotational Energy " + testCase,
-                                     plt, "width=0.80\\textwidth", path)
 
     plt.figure()
     for i in range(0,N):
@@ -401,6 +399,22 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
         plt.plot(dataLog.times()*1.0E-9, omegaData[:,i] * 180/math.pi, label='omega' + str(i))
         plt.xlabel('Time (s)')
         plt.ylabel(r'b' + str(i) + r' $\omega$ (d/s)')
+
+    plt.figure()
+    plt.plot(dataLog.times()*1e-9, eulerAngles)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Euler Angles (degrees)')
+    plt.legend(['Yaw', 'Pitch', 'Roll'])
+    plt.title('Euler Angles (321 sequence)')
+    plt.grid()
+
+    plt.figure()
+    plt.plot(dataLog.times()*1e-9, quaternions)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Quaternion Value')
+    plt.legend(['q0', 'q1', 'q2', 'q3'])
+    plt.title('Quaternions')
+    plt.grid()
 
     if testCase != 'BalancedWheels' and testCase != 'JitterFullyCoupledGravity':
         istart = int(.01/dt)
@@ -524,5 +538,6 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     # testMessage
     return [testFailCount, ''.join(testMessages)]
 
+
 if __name__ == "__main__":
-    VSCMGIntegratedTest(False,False,'JitterFullyCoupled')
+    VSCMGIntegratedTest(True,True,config['test_case'])  # show_plots, useFlag, testCase

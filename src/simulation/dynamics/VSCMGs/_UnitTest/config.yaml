@@ -1,0 +1,33 @@
+#######################################################
+# Initial conditions for the spacecraft
+#######################################################
+
+# Initial attitude and angular velocity of the spacecraft
+initial_attitude: [0.0, 5.0, 1.0]  # Initial attitude in Euler angles (321 sequence) in degrees
+initial_angular_velocity: [0.08, 0.01, 0.0]  # Initial angular velocity in body-fixed frame in rad/s
+
+# Initial position and velocity of the spacecraft
+initial_position: [0.0, 0.0, 0.0]  # Initial position in inertial frame in meters
+initial_velocity: [0.0, 0.0, 0.0]  # Initial velocity in inertial frame in m/s
+
+#######################################################
+# Initial conditions for the VSCMGs
+#######################################################
+
+# Initial wheel speeds and gimbal angles for the VSCMGs
+
+# Wheel inertia and gimbal inertia for the VSCMGs
+
+#######################################################
+# Spacecraft parameters
+#######################################################
+
+# Spacecraft mass and inertia
+spacecraft_mass: 212.0  # Mass of the spacecraft in kg
+spacecraft_inertia: 
+  - [500.0, 0.0, 0.0] 
+  - [0.0, 600.0, 0.0] 
+  - [0.0, 0.0, 700.0]  # Inertia matrix of the spacecraft in kg*m^2
+
+# Test case selection
+test_case: 'BalancedWheels'  # Options: 'BalancedWheels'
