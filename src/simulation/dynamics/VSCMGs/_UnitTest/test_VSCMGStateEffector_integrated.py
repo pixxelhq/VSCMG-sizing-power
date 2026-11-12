@@ -70,21 +70,21 @@ def defaultVSCMG():
     VSCMG.Omega = 0.
     VSCMG.gamma = 0.
     VSCMG.gammaDot = 0.
-    VSCMG.Omega_max = 6000. * macros.RPM
+    VSCMG.Omega_max = 8000. * macros.RPM
     VSCMG.gammaDot_max = -1
-    VSCMG.IW1 = 100./VSCMG.Omega_max # 0.159154943092
-    VSCMG.IW2 = 0.5*VSCMG.IW1 # 0.0795774715459
-    VSCMG.IW3 = 0.5*VSCMG.IW1 # 0.0795774715459
-    VSCMG.IG1 = 0.1
-    VSCMG.IG2 = 0.2
-    VSCMG.IG3 = 0.3
-    VSCMG.U_s = 4.8e-06 * 1e4
-    VSCMG.U_d = 1.54e-06 * 1e4
-    VSCMG.l = 0.01
-    VSCMG.L = 0.1
-    VSCMG.rGcG_G = [[0.0001],[-0.02],[0.1]]
-    VSCMG.massW = 6.
-    VSCMG.massG = 6.
+    VSCMG.IW1 = 4./VSCMG.Omega_max 
+    VSCMG.IW2 = 0.5*VSCMG.IW1 
+    VSCMG.IW3 = 0.5*VSCMG.IW1 
+    VSCMG.IG1 = 1.037e-3
+    VSCMG.IG2 = 1.037e-3
+    VSCMG.IG3 = 1.037e-3
+    VSCMG.U_s = config['vscmg_static_imbalance']  #4.8e-06 * 1e4
+    VSCMG.U_d = config['vscmg_dynamic_imbalance']  #1.54e-06 * 1e4
+    VSCMG.l = 0.0 #0.01
+    VSCMG.L = 0.0 #0.1
+    VSCMG.rGcG_G = [[0.0],[0.0],[0.0]]
+    VSCMG.massW = 1.6
+    VSCMG.massG = 1.0
     VSCMG.VSCMGModel = 0
     return VSCMG
 
@@ -150,11 +150,11 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
 
     # Create test thread
     if testCase == 'JitterFullyCoupled' or testCase == 'JitterFullyCoupledGravity':
-        dt = 0.00001
-        duration = 0.01
+        dt = config['simulation_step_size']
+        duration = config['simulation_time']
     else:
-        dt = 0.001
-        duration = 1.
+        dt = config['simulation_step_size']
+        duration = config['simulation_time']
     testProcessRate = macros.sec2nano(dt)  # update process rate update time
     testProc = unitTestSim.CreateNewProcess(unitProcessName)
     testProc.addTask(unitTestSim.CreateNewTask(unitTaskName, testProcessRate))
@@ -162,34 +162,60 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     # add RW devices
     VSCMGs = []
 
-    ang = 54.75 * np.pi/180
+    ang = config['skew_angle']
+    az_angles = [0,90,180,270]
 
     VSCMGs.append(defaultVSCMG())
-    VSCMGs[0].gsHat0_B = [[1.0], [0.0], [0.0]]
-    VSCMGs[0].gtHat0_B = [[0.0], [1.0], [0.0]]
-    VSCMGs[0].ggHat_B = [[0.0], [0.0], [1.0]]
-    VSCMGs[0].Omega = 2000 * macros.RPM
-    VSCMGs[0].gamma = 0.
-    VSCMGs[0].gammaDot = 0.06
-    VSCMGs[0].rGB_B = [[0.1], [0.002], [-0.02]]
+    VSCMGs[0].gsHat0_B = [[np.cos(np.deg2rad(ang))*np.cos(np.deg2rad(az_angles[0]))], [np.cos(np.deg2rad(ang))*np.sin(np.deg2rad(az_angles[0]))], [np.sin(np.deg2rad(ang))]]
+    VSCMGs[0].ggHat_B = [[-np.cos(np.deg2rad(90-ang))*np.cos(np.deg2rad(az_angles[0]))], [np.cos(np.deg2rad(90-ang))*np.sin(np.deg2rad(az_angles[0]))], [np.sin(np.deg2rad(90-ang))]]
+    gs0 = np.array([VSCMGs[0].gsHat0_B[0][0], VSCMGs[0].gsHat0_B[1][0], VSCMGs[0].gsHat0_B[2][0]])
+    gg0 = np.array([VSCMGs[0].ggHat_B[0][0], VSCMGs[0].ggHat_B[1][0], VSCMGs[0].ggHat_B[2][0]])
+    gt0 = np.cross(gg0, gs0)
+    gt0 = gt0 / np.linalg.norm(gt0)
+    VSCMGs[0].gtHat0_B = [[gt0[0]], [gt0[1]], [gt0[2]]]
+    VSCMGs[0].Omega = config['initial_vscmg_wheel_speeds_rpm'][0] * macros.RPM
+    VSCMGs[0].gamma = config['initial_vscmg_gimbal_angles'][0] * np.pi/180
+    VSCMGs[0].gammaDot = config['initial_vscmg_gimbal_rates'][0] * np.pi/180
+    VSCMGs[0].rGB_B = [[0.4], [0.0], [0.0]]
 
     VSCMGs.append(defaultVSCMG())
-    VSCMGs[1].gsHat0_B = [[0.0], [1.0], [0.0]]
-    VSCMGs[1].ggHat_B = [[math.cos(ang)], [0.0], [math.sin(ang)]]
-    VSCMGs[1].gtHat0_B = np.cross(np.array([math.cos(ang), 0.0, math.sin(ang)]),np.array([0.0, 1.0, 0.0]))
-    VSCMGs[1].Omega =  350 * macros.RPM
-    VSCMGs[1].gamma = 0.
-    VSCMGs[1].gammaDot = 0.011
-    VSCMGs[1].rGB_B = [[0.0], [-0.05], [0.0]]
+    VSCMGs[1].gsHat0_B = [[np.cos(np.deg2rad(ang))*np.cos(np.deg2rad(az_angles[1]))], [np.cos(np.deg2rad(ang))*np.sin(np.deg2rad(az_angles[1]))], [np.sin(np.deg2rad(ang))]]
+    VSCMGs[1].ggHat_B = [[np.cos(np.deg2rad(90-ang))*np.cos(np.deg2rad(az_angles[1]))], [-np.cos(np.deg2rad(90-ang))*np.sin(np.deg2rad(az_angles[1]))], [np.sin(np.deg2rad(90-ang))]]
+    gs1 = np.array([VSCMGs[1].gsHat0_B[0][0], VSCMGs[1].gsHat0_B[1][0], VSCMGs[1].gsHat0_B[2][0]])
+    gg1 = np.array([VSCMGs[1].ggHat_B[0][0], VSCMGs[1].ggHat_B[1][0], VSCMGs[1].ggHat_B[2][0]])
+    gt1 = np.cross(gg1, gs1)
+    gt1 = gt1 / np.linalg.norm(gt1)
+    VSCMGs[1].gtHat0_B = [[gt1[0]], [gt1[1]], [gt1[2]]]
+    VSCMGs[1].Omega = config['initial_vscmg_wheel_speeds_rpm'][1] * macros.RPM
+    VSCMGs[1].gamma = config['initial_vscmg_gimbal_angles'][1] * np.pi/180
+    VSCMGs[1].gammaDot = config['initial_vscmg_gimbal_rates'][1] * np.pi/180
+    VSCMGs[1].rGB_B = [[0.0], [0.4], [0.0]]
 
     VSCMGs.append(defaultVSCMG())
-    VSCMGs[2].gsHat0_B = [[0.0], [-1.0], [0.0]]
-    VSCMGs[2].ggHat_B = [[-math.cos(ang)], [0.0], [math.sin(ang)]]
-    VSCMGs[2].gtHat0_B = np.cross(np.array([-math.cos(ang), 0.0, math.sin(ang)]),np.array([0.0, -1.0, 0.0]))
-    VSCMGs[2].Omega = -900 * macros.RPM
-    VSCMGs[2].gamma = 0.
-    VSCMGs[2].gammaDot = -0.003
-    VSCMGs[2].rGB_B = [[-0.1], [0.05], [0.05]]
+    VSCMGs[2].gsHat0_B = [[np.cos(np.deg2rad(ang))*np.cos(np.deg2rad(az_angles[2]))], [np.cos(np.deg2rad(ang))*np.sin(np.deg2rad(az_angles[2]))], [np.sin(np.deg2rad(ang))]]
+    VSCMGs[2].ggHat_B = [[-np.cos(np.deg2rad(90-ang))*np.cos(np.deg2rad(az_angles[2]))], [np.cos(np.deg2rad(90-ang))*np.sin(np.deg2rad(az_angles[2]))], [np.sin(np.deg2rad(90-ang))]]
+    gs2 = np.array([VSCMGs[2].gsHat0_B[0][0], VSCMGs[2].gsHat0_B[1][0], VSCMGs[2].gsHat0_B[2][0]])
+    gg2 = np.array([VSCMGs[2].ggHat_B[0][0], VSCMGs[2].ggHat_B[1][0], VSCMGs[2].ggHat_B[2][0]])
+    gt2 = np.cross(gg2, gs2)
+    gt2 = gt2 / np.linalg.norm(gt2)
+    VSCMGs[2].gtHat0_B = [[gt2[0]], [gt2[1]], [gt2[2]]]
+    VSCMGs[2].Omega = config['initial_vscmg_wheel_speeds_rpm'][2] * macros.RPM
+    VSCMGs[2].gamma = config['initial_vscmg_gimbal_angles'][2] * np.pi/180
+    VSCMGs[2].gammaDot = config['initial_vscmg_gimbal_rates'][2] * np.pi/180
+    VSCMGs[2].rGB_B = [[-0.4], [0.0], [0.0]]
+
+    VSCMGs.append(defaultVSCMG())
+    VSCMGs[3].gsHat0_B = [[np.cos(np.deg2rad(ang))*np.cos(np.deg2rad(az_angles[3]))], [np.cos(np.deg2rad(ang))*np.sin(np.deg2rad(az_angles[3]))], [np.sin(np.deg2rad(ang))]]  # Spin axis direction
+    VSCMGs[3].ggHat_B = [[np.cos(np.deg2rad(90-ang))*np.cos(np.deg2rad(az_angles[3]))], [-np.cos(np.deg2rad(90-ang))*np.sin(np.deg2rad(az_angles[3]))], [np.sin(np.deg2rad(90-ang))]] # Gimbal axis
+    gs3 = np.array([VSCMGs[3].gsHat0_B[0][0], VSCMGs[3].gsHat0_B[1][0], VSCMGs[3].gsHat0_B[2][0]])
+    gg3 = np.array([VSCMGs[3].ggHat_B[0][0], VSCMGs[3].ggHat_B[1][0], VSCMGs[3].ggHat_B[2][0]])
+    gt3 = np.cross(gg3, gs3)
+    gt3 = gt3 / np.linalg.norm(gt3)
+    VSCMGs[3].gtHat0_B = [[gt3[0]], [gt3[1]], [gt3[2]]]
+    VSCMGs[3].Omega = config['initial_vscmg_wheel_speeds_rpm'][3] * macros.RPM
+    VSCMGs[3].gamma = config['initial_vscmg_gimbal_angles'][3] * np.pi/180
+    VSCMGs[3].gammaDot = config['initial_vscmg_gimbal_rates'][3] * np.pi/180
+    VSCMGs[3].rGB_B = [[0.0], [-0.4], [0.0]]  # Position in body frame
 
     if testCase == 'BalancedWheels':
         VSCMGModel = 0
@@ -202,7 +228,7 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
         VSCMG.VSCMGModel = VSCMGModel
 
     if testCase == 'JitterFullyCoupled':
-        VSCMGs = [VSCMGs[0],VSCMGs[2]]
+        VSCMGs = [VSCMGs[0],VSCMGs[1],VSCMGs[2],VSCMGs[3]]
 
     N = len(VSCMGs)
 
@@ -216,11 +242,13 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     # set RW torque command
     cmdArray = messaging.VSCMGArrayTorqueMsgPayload()
     if testCase == 'BalancedWheels' or testCase == 'JitterFullyCoupled':
-        cmdArray.wheelTorque = [0.0, 0.0, 0.0]  # [Nm]
-        cmdArray.gimbalTorque = [0.0, 0.0, 0.0]  # [Nm]
+        cmdArray.wheelTorque = config['wheel_torque']
+        cmdArray.gimbalTorque = config['gimbal_torque']
     else:
-        cmdArray.wheelTorque = [0.001, 0.005, -0.009] # [Nm]
-        cmdArray.gimbalTorque = [0.008, -0.0015, -0.006] # [Nm]
+        # cmdArray.wheelTorque = [0.001, 0.005, -0.009] # [Nm]
+        # cmdArray.gimbalTorque = [0.008, -0.0015, -0.006] # [Nm]
+        cmdArray.wheelTorque = config['wheel_torque'] # [Nm]
+        cmdArray.gimbalTorque = config['gimbal_torque'] # [Nm]
     cmdMsg = messaging.VSCMGArrayTorqueMsg().write(cmdArray)
     rwStateEffector.cmdsInMsg.subscribeTo(cmdMsg)
 
@@ -236,10 +264,7 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
 
         scObject.gravField.gravBodies = spacecraft.GravBodyVector([unitTestSim.earthGravBody])
 
-    scObject.hub.mHub = config['spacecraft_mass']
-    scObject.hub.r_BcB_B = [[-0.0002], [0.0001], [0.1]]
-    scObject.hub.IHubPntBc_B = config['spacecraft_inertia']  # [kg*m^2]
-    
+
     if testCase == 'JitterFullyCoupled':
         scObject.hub.r_CN_NInit = [[0.1],	[-0.2],	[0.3]]
         scObject.hub.v_CN_NInit = [[-0.4],	[0.5],	[-0.8]]
@@ -387,14 +412,14 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
         plt.ylabel(r'$\dot{\gamma}_'+str(i)+'$ (d/s)')
 
     plt.figure()
-    for i in range(0,N):
+    for i in range(0,3):
         plt.subplot(4,1,i+1)
         plt.plot(dataLog.times()*1.0E-9, sigmaData[:,i], label='MRP' + str(i))
         plt.xlabel('Time (s)')
         plt.ylabel(r'MRP b' + str(i))
 
     plt.figure()
-    for i in range(0,N):
+    for i in range(0,3):
         plt.subplot(4,1,i+1)
         plt.plot(dataLog.times()*1.0E-9, omegaData[:,i] * 180/math.pi, label='omega' + str(i))
         plt.xlabel('Time (s)')
@@ -415,6 +440,25 @@ def VSCMGIntegratedTest(show_plots,useFlag,testCase):
     plt.legend(['q0', 'q1', 'q2', 'q3'])
     plt.title('Quaternions')
     plt.grid()
+
+    # Plot rotational angular momentum
+    plt.figure()
+    plt.plot(scObjectLog.times()*1.0E-9, rotAngMom_N[:,1], label='L_x')
+    plt.plot(scObjectLog.times()*1.0E-9, rotAngMom_N[:,2], label='L_y')
+    plt.plot(scObjectLog.times()*1.0E-9, rotAngMom_N[:,3], label='L_z')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Rotational Angular Momentum (kg*m^2/s)')
+    plt.title('Total Rotational Angular Momentum')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # Plot rotational kinetic energy
+    plt.figure()
+    plt.plot(scObjectLog.times()*1.0E-9, rotEnergy[:,1])
+    plt.xlabel('Time (s)')
+    plt.ylabel('Rotational Kinetic Energy (J)')
+    plt.title('Total Rotational Energy')
+    plt.grid(True, alpha=0.3)
 
     if testCase != 'BalancedWheels' and testCase != 'JitterFullyCoupledGravity':
         istart = int(.01/dt)

@@ -3,20 +3,41 @@
 #######################################################
 
 # Initial attitude and angular velocity of the spacecraft
-initial_attitude: [0.0, 5.0, 1.0]  # Initial attitude in Euler angles (321 sequence) in degrees
-initial_angular_velocity: [0.08, 0.01, 0.0]  # Initial angular velocity in body-fixed frame in rad/s
+initial_attitude: [2.0, 5.0, 1.0]  # Initial attitude in Euler angles (321 sequence) in degrees
+initial_angular_velocity: [0.0, 0.0, 0.0]  # Initial angular velocity in body-fixed frame in rad/s
 
 # Initial position and velocity of the spacecraft
 initial_position: [0.0, 0.0, 0.0]  # Initial position in inertial frame in meters
 initial_velocity: [0.0, 0.0, 0.0]  # Initial velocity in inertial frame in m/s
 
 #######################################################
+# Configuration for the VSCMGs
+#######################################################
+# 4 VSCMG - elevation=35 deg, azimuth=0,90,180,270 deg
+skew_angle: 55.0 # Skew angle of the VSCMGs in degrees
+
+
+#######################################################
 # Initial conditions for the VSCMGs
 #######################################################
 
 # Initial wheel speeds and gimbal angles for the VSCMGs
+initial_vscmg_wheel_speeds_rad_per_sec: [0.0, 0.0, 0.0, 0.0]  # Initial wheel speeds in rad/s
+initial_vscmg_wheel_speeds_rpm: [500.0, -500.0, 500.0, -500.0]  # Initial wheel speeds in RPM
+initial_vscmg_gimbal_angles: [0.0, 0.0, 0.0, 0.0]  # Initial gimbal angles in degrees - it gets convert to rad in the code
+initial_vscmg_gimbal_rates: [0.0, 0.0, 0.0, 0.0]  # Initial gimbal rates in deg/s - it gets convert to rad/s in the code
 
 # Wheel inertia and gimbal inertia for the VSCMGs
+vscmg_wheel_inertia: 0.1  # Wheel inertia in kg*m^2
+vscmg_gimbal_inertia: 0.05  # Gimbal inertia in kg*m^2
+
+# Static & dynamic imbalance for the VSCMGs
+vscmg_static_imbalance: 0.0  # Static imbalance in kg*m
+vscmg_dynamic_imbalance: 0.0  # Dynamic imbalance in kg*m
+
+#
+wheel_torque: [0.0, 0.0, 0.0, 0.0]  # Wheel torque in N*m
+gimbal_torque: [0.0, 0.0, 0.0, 0.0]  # Gimbal torque in N*m
 
 #######################################################
 # Spacecraft parameters
@@ -25,9 +46,13 @@ initial_velocity: [0.0, 0.0, 0.0]  # Initial velocity in inertial frame in m/s
 # Spacecraft mass and inertia
 spacecraft_mass: 212.0  # Mass of the spacecraft in kg
 spacecraft_inertia: 
-  - [500.0, 0.0, 0.0] 
-  - [0.0, 600.0, 0.0] 
-  - [0.0, 0.0, 700.0]  # Inertia matrix of the spacecraft in kg*m^2
+  - [55.61, 0.0, 0.0] 
+  - [0.0, 105.93, 0.0] 
+  - [0.0, 0.0, 114.81]  # Inertia matrix of the spacecraft in kg*m^2
 
 # Test case selection
 test_case: 'BalancedWheels'  # Options: 'BalancedWheels'
+
+# simulation parameters
+simulation_time: 10.0  # Total simulation time in seconds
+simulation_step_size: 0.01  # Simulation step size in seconds
